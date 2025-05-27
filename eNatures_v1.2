@@ -1,0 +1,151 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <time.h>
+#include <Wire.h>
+#include <Adafruit_SHTC3.h>
+
+Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+ESP8266WebServer server(80);
+
+// Wi-Fi
+const char* ssid = "Tehillah";
+const char* password = "8452DMeira";
+
+// Pinos
+#define RELE1 D6
+#define RELE2 D7
+#define LED D5
+#define SENSOR_SOLO A0
+#define SDA D2
+#define SCL D1
+
+// Controle manual
+String modoRele1 = "auto";
+String modoRele2 = "auto";
+String modoLED = "auto";
+
+float temperatura = 0;
+float umidade_ar = 0;
+int umidade_solo = 0;
+bool ventiladorLigado = false;
+unsigned long tempoLigado = 0;
+
+// NTP
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -3 * 3600;
+const int daylightOffset_sec = 0;
+
+void setup() {
+  Serial.begin(9600);
+  WiFi.begin(ssid, password);
+  Wire.begin(SDA, SCL);
+  shtc3.begin();
+
+  pinMode(RELE1, OUTPUT);
+  pinMode(RELE2, OUTPUT);
+  pinMode(LED, OUTPUT);
+  digitalWrite(RELE1, HIGH);  // Inicialmente desligados
+  digitalWrite(RELE2, HIGH);
+  digitalWrite(LED, LOW);
+
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  server.on("/", handleRoot);
+  server.on("/set", handleSet);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  atualizaSensores();
+  controlaEstufa();
+}
+
+void atualizaSensores() {
+  sensors_event_t humidity, temp;
+  shtc3.getEvent(&humidity, &temp);
+
+  temperatura = temp.temperature;
+  umidade_ar = humidity.relative_humidity;
+
+  int leitura = analogRead(SENSOR_SOLO);
+  umidade_solo = map(leitura, 1023, 450, 0, 100);
+  umidade_solo = constrain(umidade_solo, 0, 100);
+}
+
+void controlaEstufa() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return;
+
+  int hora = timeinfo.tm_hour;
+
+  // Luz Grow (RELE1)
+  if (modoRele1 == "auto") {
+    digitalWrite(RELE1, (hora >= 7 && hora < 17) ? LOW : HIGH);
+  } else if (modoRele1 == "on") {
+    digitalWrite(RELE1, LOW);  // ON = LOW
+  } else if (modoRele1 == "off") {
+    digitalWrite(RELE1, HIGH); // OFF = HIGH
+  }
+
+  // Ventilador (RELE2)
+  if (modoRele2 == "auto") {
+    if (temperatura > 25 && !ventiladorLigado) {
+      digitalWrite(RELE2, LOW);
+      ventiladorLigado = true;
+      tempoLigado = millis();
+    } else if (ventiladorLigado && millis() - tempoLigado >= 1800000UL) {
+      digitalWrite(RELE2, HIGH);
+      ventiladorLigado = false;
+    } else if (temperatura <= 25 && !ventiladorLigado) {
+      digitalWrite(RELE2, HIGH);
+    }
+  } else if (modoRele2 == "on") {
+    digitalWrite(RELE2, LOW);  // ON = LOW
+  } else if (modoRele2 == "off") {
+    digitalWrite(RELE2, HIGH); // OFF = HIGH
+  }
+
+  // LED (já está correto)
+  if (modoLED == "auto") {
+    digitalWrite(LED, (umidade_solo < 60) ? HIGH : LOW);
+  } else if (modoLED == "on") {
+    digitalWrite(LED, HIGH);
+  } else if (modoLED == "off") {
+    digitalWrite(LED, LOW);
+  }
+}
+
+void handleSet() {
+  if (server.hasArg("rele1")) modoRele1 = server.arg("rele1");
+  if (server.hasArg("rele2")) modoRele2 = server.arg("rele2");
+  if (server.hasArg("led"))   modoLED = server.arg("led");
+
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleRoot() {
+  struct tm timeinfo;
+  getLocalTime(&timeinfo);
+  char horaFormatada[9];
+  strftime(horaFormatada, sizeof(horaFormatada), "%H:%M:%S", &timeinfo);
+
+  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='600'>";
+  html += "<style>body{font-family:sans-serif;background:#f0f0f0;color:#333;text-align:center;}h1{color:#2c3e50;}button{padding:10px;margin:5px;font-size:16px;}</style>";
+  html += "<h1>eNatures Estufa</h1>";
+  html += "<p><b>Hora atual:</b> " + String(horaFormatada) + "</p>";
+  html += "<p><b>Temperatura:</b> " + String(temperatura, 1) + " ºC</p>";
+  html += "<p><b>Umidade do Ar:</b> " + String(umidade_ar, 1) + " %</p>";
+  html += "<p><b>Umidade do Solo:</b> " + String(umidade_solo) + " %</p>";
+
+  html += "<form action='/set' method='get'>";
+  html += "<p>Luz Grow: <select name='rele1'><option>" + modoRele1 + "</option><option>on</option><option>off</option><option>auto</option></select></p>";
+  html += "<p>Ventilador: <select name='rele2'><option>" + modoRele2 + "</option><option>on</option><option>off</option><option>auto</option></select></p>";
+  html += "<p>LED Umidade: <select name='led'><option>" + modoLED + "</option><option>on</option><option>off</option><option>auto</option></select></p>";
+  html += "<p><button type='submit'>Aplicar</button></p></form>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
