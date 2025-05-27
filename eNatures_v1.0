@@ -1,0 +1,146 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <Wire.h>
+#include <Adafruit_SHTC3.h>
+
+#define GROW D6
+#define FAN D7
+#define SOLO D5
+#define SDA D2
+#define SCL D1
+#define SOIL A0
+
+const char* ssid = "Tehillah";
+const char* password = "8452DMeira";
+
+ESP8266WebServer server(80);
+Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+
+unsigned long previousMillis = 0;
+const long interval = 10000; // 10 segundos
+unsigned long lastRecordMillis = 0;
+const long recordInterval = 3600000; // 1 hora
+
+struct Registro {
+  float temperatura;
+  float umidadeAr;
+  int umidadeSolo;
+};
+
+Registro historico[24];
+int indiceHistorico = 0;
+
+void setup() {
+  pinMode(GROW, OUTPUT);
+  pinMode(FAN, OUTPUT);
+  pinMode(SOLO, OUTPUT);
+  
+  digitalWrite(GROW, LOW);
+  digitalWrite(FAN, LOW);
+  digitalWrite(SOLO, LOW);
+
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("WiFi conectado");
+
+  if (!shtc3.begin()) {
+    Serial.println("Não encontrou SHTC3");
+  }
+
+  server.on("/", handleRoot);
+  server.begin();
+}
+
+void loop() {
+  yield(); // Watchdog: alimenta pra não travar
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi caiu, reiniciando...");
+    ESP.restart();
+  }
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    controlarEstufa();
+    server.handleClient();
+  }
+
+  if (currentMillis - lastRecordMillis >= recordInterval) {
+    lastRecordMillis = currentMillis;
+    registrarHistorico();
+  }
+}
+
+void controlarEstufa() {
+  sensors_event_t humidity, temp;
+  shtc3.getEvent(&humidity, &temp);
+
+  int umidadeSolo = analogRead(SOIL);
+  umidadeSolo = map(umidadeSolo, 1023, 0, 0, 100);
+
+  // Controle Fan
+  if (temp.temperature > 25) {
+    digitalWrite(FAN, HIGH);
+  } else {
+    digitalWrite(FAN, LOW);
+  }
+
+  // Controle Solo
+  if (umidadeSolo < 60) {
+    digitalWrite(SOLO, HIGH);
+  } else {
+    digitalWrite(SOLO, LOW);
+  }
+
+  // Controle Grow com base no horário de Brasília
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  int hora = timeinfo->tm_hour;
+
+  if (hora >= 7 && hora < 17) {
+    digitalWrite(GROW, HIGH);
+  } else {
+    digitalWrite(GROW, LOW);
+  }
+
+
+  Serial.printf("Temp: %.2f, UmidadeAr: %.2f, Solo: %d%%\n", temp.temperature, humidity.relative_humidity, umidadeSolo);
+}
+
+void registrarHistorico() {
+  sensors_event_t humidity, temp;
+  shtc3.getEvent(&humidity, &temp);
+
+  int umidadeSolo = analogRead(SOIL);
+  umidadeSolo = map(umidadeSolo, 1023, 0, 0, 100);
+
+  historico[indiceHistorico].temperatura = temp.temperature;
+  historico[indiceHistorico].umidadeAr = humidity.relative_humidity;
+  historico[indiceHistorico].umidadeSolo = umidadeSolo;
+
+  indiceHistorico = (indiceHistorico + 1) % 24;
+
+  Serial.println("Histórico registrado.");
+}
+
+void handleRoot() {
+  String html = "<html><head><meta http-equiv='refresh' content='10'></head><body>";
+  html += "<h1>Estufa - Cebolinha</h1>";
+
+  for (int i = 0; i < 24; i++) {
+    html += "Registro " + String(i+1) + ": ";
+    html += "Temp: " + String(historico[i].temperatura) + "°C, ";
+    html += "Umidade Ar: " + String(historico[i].umidadeAr) + "%, ";
+    html += "Solo: " + String(historico[i].umidadeSolo) + "%<br>";
+  }
+
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
