@@ -1,0 +1,180 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <Wire.h>
+#include "Adafruit_SHTC3.h"
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+// Wi-Fi
+const char* ssid = "Tehillah";
+const char* password = "8452DMeira";
+
+// Pinos
+#define rele1 D6
+#define rele2 D7
+#define ledAzul D5
+#define umidadeSoloPin A0
+
+// Sensor de temperatura e umidade
+Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+
+// Variáveis de sensores
+float temperatura = 0.0;
+float umidadeAr = 0.0;
+int umidadeSolo = 0;
+int umidadeSoloPercent = 0;
+
+// NTP
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", -3 * 3600, 60000);
+
+// Controle de tempo
+unsigned long ultimoRegistro = 0;
+unsigned long ultimoUpdate = 0;
+
+// Estrutura para armazenar o histórico
+struct Historico {
+  float temperatura;
+  float umidadeAr;
+  int umidadeSolo;
+};
+
+Historico historico[12];
+int indiceHistorico = 0;
+
+// Servidor Web
+ESP8266WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(rele1, OUTPUT);
+  pinMode(rele2, OUTPUT);
+  pinMode(ledAzul, OUTPUT);
+
+  digitalWrite(rele1, LOW);
+  digitalWrite(rele2, LOW);
+  digitalWrite(ledAzul, LOW);
+
+  Wire.begin(D2, D1);
+  
+  if (!shtc3.begin()) {
+    Serial.println("Erro ao iniciar o sensor SHTC3!");
+    while (1) delay(1);
+  }
+
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando-se ao Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
+  timeClient.begin();
+
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Servidor HTTP iniciado");
+}
+
+void loop() {
+  unsigned long agora = millis();
+
+  // Atualização a cada 1 segundo
+  if (agora - ultimoUpdate >= 1000) {
+    ultimoUpdate = agora;
+
+    timeClient.update();
+    int horaAtual = timeClient.getHours();
+
+    // Leitura do sensor de umidade do solo
+    umidadeSolo = analogRead(umidadeSoloPin);
+    umidadeSoloPercent = map(umidadeSolo, 1023, 0, 0, 100);
+
+    // Leitura do sensor SHTC3
+    sensors_event_t humidity, temp;
+    shtc3.getEvent(&humidity, &temp);
+    temperatura = temp.temperature;
+    umidadeAr = humidity.relative_humidity;
+
+    // Controle do relé 1 - Luz Grow
+    if (horaAtual >= 7 && horaAtual < 17) {
+      digitalWrite(rele1, HIGH);
+    } else {
+      digitalWrite(rele1, LOW);
+    }
+
+    // Controle do relé 2 - Ventilador
+    if (temperatura > 25.0) {
+      digitalWrite(rele2, HIGH);
+    } else {
+      digitalWrite(rele2, LOW);
+    }
+
+    // Controle do LED azul
+    if (umidadeSoloPercent < 60) {
+      digitalWrite(ledAzul, HIGH);
+    } else {
+      digitalWrite(ledAzul, LOW);
+    }
+
+    // Mostra no Serial
+    Serial.print("Agora | Temp: ");
+    Serial.print(temperatura);
+    Serial.print(" °C | Umidade Ar: ");
+    Serial.print(umidadeAr);
+    Serial.print(" % | Umidade Solo: ");
+    Serial.print(umidadeSoloPercent);
+    Serial.println(" %");
+  }
+
+  // Registro a cada 5 minutos
+  if (agora - ultimoRegistro >= 300000) {
+    ultimoRegistro = agora;
+
+    historico[indiceHistorico].temperatura = temperatura;
+    historico[indiceHistorico].umidadeAr = umidadeAr;
+    historico[indiceHistorico].umidadeSolo = umidadeSoloPercent;
+
+    indiceHistorico = (indiceHistorico + 1) % 12;
+
+    Serial.println("### Histórico atualizado ###");
+    for (int i = 0; i < 12; i++) {
+      Serial.print(i + 1);
+      Serial.print(" - Temp: ");
+      Serial.print(historico[i].temperatura);
+      Serial.print(" °C | Umidade Ar: ");
+      Serial.print(historico[i].umidadeAr);
+      Serial.print(" % | Umidade Solo: ");
+      Serial.print(historico[i].umidadeSolo);
+      Serial.println(" %");
+    }
+    Serial.println("###########################");
+  }
+
+  server.handleClient();
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Estufa Monitor</title></head><body>";
+  html += "<h1>Monitor da Estufa</h1>";
+  html += "<p><b>Temperatura:</b> " + String(temperatura) + " °C</p>";
+  html += "<p><b>Umidade do Ar:</b> " + String(umidadeAr) + " %</p>";
+  html += "<p><b>Umidade do Solo:</b> " + String(umidadeSoloPercent) + " %</p>";
+  html += "<h2>Histórico (últimos 12 registros):</h2><ul>";
+
+  for (int i = 0; i < 12; i++) {
+    html += "<li>";
+    html += String(i + 1) + ": Temp: " + String(historico[i].temperatura) + " °C | ";
+    html += "Umidade Ar: " + String(historico[i].umidadeAr) + " % | ";
+    html += "Umidade Solo: " + String(historico[i].umidadeSolo) + " %";
+    html += "</li>";
+  }
+
+  html += "</ul></body></html>";
+
+  server.send(200, "text/html", html);
+}
